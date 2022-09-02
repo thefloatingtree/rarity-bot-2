@@ -1,14 +1,17 @@
-from functools import reduce
 import json
+import random
+
 import hikari
 import lightbulb
+
 from derpibooru import Search
-import random
-import os
-from dotenv import load_dotenv
+
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore_async
+
+import os
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -22,6 +25,7 @@ rarity = lightbulb.BotApp(
     default_enabled_guilds=(int(os.getenv("ENABLED_GUILD"))),
     case_insensitive_prefix_commands=True,
 )
+
 
 def search_derpi(tags: list[str]) -> str:
     found_image = False
@@ -223,7 +227,48 @@ async def emote_send(ctx: lightbulb.Context) -> None:
         await ctx.respond(f'Emote "{ctx.options.name}" does not exist')
 
 
+@rarity.command
+@lightbulb.command("drawings_from_a_hat", "add and pull random art prompts!")
+@lightbulb.implements(lightbulb.SlashCommandGroup)
+async def drawings_from_a_hat(ctx: lightbulb.Context):
+    pass
+
+
+@drawings_from_a_hat.child
+@lightbulb.option("prompt", "the prompt to be drawn")
+@lightbulb.command("add", "add a new prompt to the pile")
+@lightbulb.implements(lightbulb.SlashSubCommand)
+async def drawings_from_a_hat_add(ctx: lightbulb.Context) -> None:
+    prompts_ref = firebase_db.collection("drawings_from_a_hat_prompts")
+    number_of_prompts = len(await prompts_ref.get())
+
+    await prompts_ref.add(
+        {
+            "author": ctx.author.username,
+            "name": ctx.options.prompt,
+        }
+    )
+
+    await ctx.respond(f"Prompt added. {number_of_prompts + 1} prompts in the hat")
+
+
+@drawings_from_a_hat.child
+@lightbulb.command("pull", "pull a prompt to draw")
+@lightbulb.implements(lightbulb.SlashSubCommand)
+async def drawings_from_a_hat_pull(ctx: lightbulb.Context) -> None:
+    prompts_ref = firebase_db.collection("drawings_from_a_hat_prompts")
+    prompts = await prompts_ref.get()
+
+    if prompts:
+        prompt = random.choice(prompts)
+
+        await ctx.author.send(f'Your prompt is:\n```{prompt.get("name")}```')
+        await ctx.respond(f"Prompt sent to {ctx.author.username} in dm")
+    else:
+        await ctx.respond("There are no prompts in the hat")
+
+
 # Secret Santa
-# Drawings from a hat
+# Fitness
 
 rarity.run()
