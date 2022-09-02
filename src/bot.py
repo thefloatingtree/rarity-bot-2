@@ -19,7 +19,7 @@ firebase_db = firestore_async.client()
 rarity = lightbulb.BotApp(
     prefix="!rarity ",
     token=os.getenv("BOT_TOKEN"),
-    default_enabled_guilds=(341062771263143938, 413932344676712458),
+    default_enabled_guilds=(int(os.getenv("ENABLED_GUILD"))),
     case_insensitive_prefix_commands=True,
 )
 
