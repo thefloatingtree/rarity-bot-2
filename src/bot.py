@@ -28,13 +28,10 @@ rarity = lightbulb.BotApp(
 
 
 def search_derpi(tags: list[str]) -> str:
-    found_image = False
     for image in Search().query("safe", *tags).sort_by("random").limit(1):
-        found_image = True
         return image.medium
 
-    if not found_image:
-        return "No images matching query: " + ", ".join(tags)
+    return "No images matching query: " + ", ".join(tags)
 
 
 @rarity.command
@@ -78,7 +75,7 @@ async def emergency_raritwi(ctx: lightbulb.Context):
 @lightbulb.command("emergency_rarity", "rarity images")
 @lightbulb.implements(lightbulb.PrefixCommand, lightbulb.SlashCommand)
 async def emergency_rarity(ctx: lightbulb.Context):
-    response = search_derpi(["rarilight", "pony"])
+    response = search_derpi(["rarity", "pony", "solo"])
     await ctx.respond(response)
 
 
@@ -86,7 +83,7 @@ async def emergency_rarity(ctx: lightbulb.Context):
 @lightbulb.command("emergency_twilight", "twilight images")
 @lightbulb.implements(lightbulb.PrefixCommand, lightbulb.SlashCommand)
 async def emergency_twilight(ctx: lightbulb.Context):
-    response = search_derpi(["rarilight", "pony"])
+    response = search_derpi(["ts", "pony", "solo"])
     await ctx.respond(response)
 
 
@@ -269,6 +266,13 @@ async def drawings_from_a_hat_pull(ctx: lightbulb.Context) -> None:
 
 
 # Secret Santa
+# Draw along
+# Initialize: prompt, time
+# Join
+# Leave
+# Start
+# Cancel
+# Participants
 # Fitness
 
 rarity.run()
