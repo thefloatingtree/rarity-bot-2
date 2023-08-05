@@ -15,6 +15,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import openai
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
 cred = credentials.Certificate(json.loads(os.getenv("FIREBASE_PRIVATE_KEY_DICT")))
 firebase_app = firebase_admin.initialize_app(cred)
 firebase_db = firestore_async.client()
@@ -24,6 +28,7 @@ rarity = lightbulb.BotApp(
     token=os.getenv("BOT_TOKEN"),
     default_enabled_guilds=(int(os.getenv("ENABLED_GUILD"))),
     case_insensitive_prefix_commands=True,
+    intents=(hikari.Intents.ALL_UNPRIVILEGED | hikari.Intents.MESSAGE_CONTENT),
 )
 
 
@@ -32,6 +37,91 @@ def search_derpi(tags: list[str]) -> str:
         return image.medium
 
     return "No images matching query: " + ", ".join(tags)
+
+
+@rarity.command
+@lightbulb.command("chat", "chat with rarity!")
+@lightbulb.implements(lightbulb.PrefixCommandGroup, lightbulb.SlashCommandGroup)
+async def chat(ctx: lightbulb.Context):
+    pass
+
+
+@rarity.listen(hikari.GuildMessageCreateEvent)
+async def chat_listener(event: hikari.GuildMessageCreateEvent):
+    max_chat_history_length = 20
+
+    if event.is_bot:
+        return
+
+    channel = event.get_channel()
+    is_chat_channel = channel.name == "rarity-chat"
+
+    if not is_chat_channel:
+        return
+
+    await event.get_channel().trigger_typing()
+
+    if len(event.content) > 1028:
+        return await event.message.respond("I'm not reading all that...")
+
+    # Ensure chat history exists in firebase
+    chat_history_document_ref = firebase_db.collection("chat").document("history")
+    chat_history_document = await chat_history_document_ref.get()
+    chat_history = chat_history_document.get("history")
+    if chat_history == None:
+        await chat_history_document_ref.set({"history": []})
+        chat_history = []
+
+    # Get a response from open ai for the new message
+    new_chat_message = {
+        "role": "user",
+        "content": f"{event.get_member().display_name}: {event.content}",
+    }
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are Rarity from the tv show my little pony. You should not mention that you are from that tv show, but you should inherit her speaking pattern, preferences, and goals. Your goal is to have a funny or interesting conversation with the user. The user's name that you're chatting with will preface the message. When responding you should not preface your message with your name.",
+            },
+            *chat_history,
+            new_chat_message,
+        ],
+        temperature=1.2,
+        max_tokens=256,
+        top_p=1,
+        frequency_penalty=0.3,
+        presence_penalty=0.3,
+    )
+
+    # Save new message and response to firebase history
+    response_content = response["choices"][0]["message"]["content"]
+    new_bot_message = {"role": "assistant", "content": response_content}
+
+    chat_history.append(new_chat_message)
+    chat_history.append(new_bot_message)
+
+    # Ensure chat history doesn't grow larger than max length. Trim from the start, not the end
+    if len(chat_history) > max_chat_history_length:
+        amount_to_trim = (
+            len(chat_history) - max_chat_history_length
+            if len(chat_history) - max_chat_history_length >= 0
+            else 0
+        )
+        chat_history = chat_history[amount_to_trim:]
+
+    await chat_history_document_ref.set({"history": chat_history})
+
+    await event.message.respond(content=response_content)
+
+
+@chat.child
+@lightbulb.command("clear", "clear rarity's memory of the conversation!")
+@lightbulb.implements(lightbulb.PrefixSubCommand, lightbulb.SlashSubCommand)
+async def chat_clear_history(ctx: lightbulb.Context) -> None:
+    await firebase_db.collection("chat").document("history").set({"history": []})
+
+    await ctx.respond("I'm sorry, what were we talking about?")
 
 
 @rarity.command
