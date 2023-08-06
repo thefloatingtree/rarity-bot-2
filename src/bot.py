@@ -31,12 +31,27 @@ rarity = lightbulb.BotApp(
     intents=(hikari.Intents.ALL_UNPRIVILEGED | hikari.Intents.MESSAGE_CONTENT),
 )
 
+chat_default_system_message = "You are Rarity from the tv show my little pony. You should not mention that you are from that tv show, but you should inherit her speaking pattern, preferences, and goals. Your goal is to have a funny or interesting conversation with the user. The user's name that you're chatting with will preface the message. When responding you should not preface your message with your name. Be dynamic with the length of responses, keep your responses casual in nature."
+
 
 def search_derpi(tags: list[str]) -> str:
     for image in Search().query("safe", *tags).sort_by("random").limit(1):
         return image.medium
 
     return "No images matching query: " + ", ".join(tags)
+
+
+async def get_firebase_value(
+    collection_name: str, document_name: str, field_name: str, default_value
+):
+    # Ensure value exists in firebase
+    document_ref = firebase_db.collection(collection_name).document(document_name)
+    document = await document_ref.get()
+    value = document.get(field_name)
+    if value == None:
+        await document_ref.set({field_name: default_value})
+        value = default_value
+    return value
 
 
 @rarity.command
@@ -64,13 +79,10 @@ async def chat_listener(event: hikari.GuildMessageCreateEvent):
     if len(event.content) > 1028:
         return await event.message.respond("I'm not reading all that...")
 
-    # Ensure chat history exists in firebase
-    chat_history_document_ref = firebase_db.collection("chat").document("history")
-    chat_history_document = await chat_history_document_ref.get()
-    chat_history = chat_history_document.get("history")
-    if chat_history == None:
-        await chat_history_document_ref.set({"history": []})
-        chat_history = []
+    chat_history = await get_firebase_value("chat", "history", "history", [])
+    system_prompt = await get_firebase_value(
+        "chat", "system_prompt", "system_prompt", chat_default_system_message
+    )
 
     # Get a response from open ai for the new message
     new_chat_message = {
@@ -80,10 +92,7 @@ async def chat_listener(event: hikari.GuildMessageCreateEvent):
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
         messages=[
-            {
-                "role": "system",
-                "content": "You are Rarity from the tv show my little pony. You should not mention that you are from that tv show, but you should inherit her speaking pattern, preferences, and goals. Your goal is to have a funny or interesting conversation with the user. The user's name that you're chatting with will preface the message. When responding you should not preface your message with your name.",
-            },
+            {"role": "system", "content": system_prompt},
             *chat_history,
             new_chat_message,
         ],
@@ -110,7 +119,9 @@ async def chat_listener(event: hikari.GuildMessageCreateEvent):
         )
         chat_history = chat_history[amount_to_trim:]
 
-    await chat_history_document_ref.set({"history": chat_history})
+    await firebase_db.collection("chat").document("history").set(
+        {"history": chat_history}
+    )
 
     await event.message.respond(content=response_content)
 
@@ -121,7 +132,48 @@ async def chat_listener(event: hikari.GuildMessageCreateEvent):
 async def chat_clear_history(ctx: lightbulb.Context) -> None:
     await firebase_db.collection("chat").document("history").set({"history": []})
 
-    await ctx.respond("I'm sorry, what were we talking about?")
+    await ctx.respond("History cleared!")
+
+
+@chat.child
+@lightbulb.option("prompt", "the system prompt")
+@lightbulb.command(
+    "set_system_prompt",
+    "change the bot's personality, also clears the bot's memory of the conversation",
+)
+@lightbulb.implements(lightbulb.PrefixSubCommand, lightbulb.SlashSubCommand)
+async def chat_set_system_prompt(ctx: lightbulb.Context) -> None:
+    await firebase_db.collection("chat").document("history").set({"history": []})
+    await firebase_db.collection("chat").document("system_prompt").set(
+        {"system_prompt": ctx.options.prompt}
+    )
+
+    await ctx.respond("System prompt updated! History Cleared!")
+
+
+@chat.child
+@lightbulb.command("get_system_prompt", "get the current system prompt")
+@lightbulb.implements(lightbulb.PrefixSubCommand, lightbulb.SlashSubCommand)
+async def chat_set_system_prompt(ctx: lightbulb.Context) -> None:
+    system_prompt = await get_firebase_value(
+        "chat", "system_prompt", "system_prompt", chat_default_system_message
+    )
+
+    await ctx.respond(system_prompt)
+
+
+@chat.child
+@lightbulb.command(
+    "reset_system_prompt_to_default", "makes rarity be like rarity again"
+)
+@lightbulb.implements(lightbulb.PrefixSubCommand, lightbulb.SlashSubCommand)
+async def chat_set_system_prompt(ctx: lightbulb.Context) -> None:
+    await firebase_db.collection("chat").document("history").set({"history": []})
+    await firebase_db.collection("chat").document("system_prompt").set(
+        {"system_prompt": chat_default_system_message}
+    )
+
+    await ctx.respond("System prompt updated! History Cleared!")
 
 
 @rarity.command
