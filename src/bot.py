@@ -90,7 +90,7 @@ async def chat_listener(event: hikari.GuildMessageCreateEvent):
         "content": f"{event.get_member().display_name}: {event.content}",
     }
     response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4",
         messages=[
             {"role": "system", "content": system_prompt},
             *chat_history,
