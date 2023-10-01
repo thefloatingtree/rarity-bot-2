@@ -96,7 +96,7 @@ async def chat_listener(event: hikari.GuildMessageCreateEvent):
             *chat_history,
             new_chat_message,
         ],
-        temperature=1.2,
+        temperature=0.9,
         max_tokens=256,
         top_p=1,
         frequency_penalty=0.3,
