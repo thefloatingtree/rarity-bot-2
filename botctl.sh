@@ -23,7 +23,7 @@ SERVICE="discordbot"                         # systemd unit name (no .service)
 APP_DIR="/home/thefloatingtree/rarity-bot-2"   # where the bot code lives
 PYTHON="/usr/bin/python3"                     # interpreter used to install deps
 REQUIREMENTS="requirements.txt"               # relative to APP_DIR; skipped if absent
-BRANCH="main"                                 # git branch to deploy
+BRANCH="master"                                 # git branch to deploy
 # ----------------------------------------------------------------------
 
 # Use sudo for systemctl only if we're not already root.
