@@ -66,6 +66,22 @@ def _added_summary(kind: str, added, skipped) -> str:
     return "\n".join(parts)
 
 
+def _chunk_lines(lines, limit: int = 2000):
+    """Join lines into messages, each within Discord's `limit` character cap."""
+    chunks = []
+    current = ""
+    for line in lines:
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _countdown_span(seconds: float) -> str:
     total_minutes = max(0, round(seconds / 60))
     if total_minutes == 0:
@@ -290,6 +306,40 @@ async def add_prompt(ctx: lightbulb.Context) -> None:
 
     await prompts_ref.add({"name": prompt, "author": ctx.author.username})
     await ctx.respond("Prompt added to the pool!")
+
+
+@daily_doodle.child
+@lightbulb.command("list", "DM yourself the full pool of characters and prompts")
+@lightbulb.implements(lightbulb.SlashSubCommand)
+async def list_pool(ctx: lightbulb.Context) -> None:
+    characters = await firebase_db.collection(CHARACTERS_COLLECTION).get()
+    all_prompts = await firebase_db.collection(PROMPTS_COLLECTION).get()
+    active = _active_prompts(all_prompts)
+
+    character_names = sorted(
+        (doc.get("name") for doc in characters if doc.get("name")), key=str.lower
+    )
+    prompt_names = sorted(
+        (doc.get("name") for doc in active if doc.get("name")), key=str.lower
+    )
+
+    lines = ["**Daily Doodle Pool**", "", f"__Characters ({len(character_names)})__"]
+    lines += [f"• {name}" for name in character_names] or ["_(none)_"]
+    lines += ["", f"__Prompts ({len(prompt_names)})__"]
+    lines += [f"• {name}" for name in prompt_names] or ["_(none)_"]
+
+    archived_count = len(all_prompts) - len(active)
+    if archived_count:
+        lines += ["", f"_{archived_count} prompt(s) already used_"]
+
+    try:
+        for chunk in _chunk_lines(lines):
+            await ctx.author.send(chunk)
+    except hikari.ForbiddenError:
+        await ctx.respond("I couldn't DM you. Are your DMs open?")
+        return
+
+    await ctx.respond("Sent you a DM with the current pool.")
 
 
 @daily_doodle.child
