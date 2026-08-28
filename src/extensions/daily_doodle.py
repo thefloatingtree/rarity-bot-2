@@ -8,6 +8,7 @@ import lightbulb
 from lightbulb.ext import tasks
 
 from config import firebase_db, ENABLED_GUILD
+from services import get_firebase_value
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,10 @@ DAILY_DOODLE_CHANNEL = "daily-doodle"
 CHARACTERS_COLLECTION = "daily_doodle_characters"
 PROMPTS_COLLECTION = "daily_doodle_prompts"
 STREAKS_COLLECTION = "daily_doodle_streaks"
+CONFIG_COLLECTION = "daily_doodle_config"
+CONFIG_DOCUMENT = "settings"
+PAUSED_FIELD = "auto_pull_paused"
+LAST_PULL_FIELD = "last_pull_date"
 DAILY_PULL_CRON = "0 12 * * *"  # 08:00 US Eastern (EDT); winter EST would be "0 13 * * *"
 
 # Streaks count in US Eastern calendar days (matching the pull). A streak survives skipping
@@ -46,39 +51,36 @@ def _active_prompts(prompts):
     return [prompt for prompt in prompts if not prompt.get("archived_at")]
 
 
-def _quote_join(names):
-    return ", ".join(f'"{name}"' for name in names)
-
-
 def _added_summary(kind: str, added, skipped) -> str:
+    # Report counts only — names are kept semi-secret, revealed only when pulled
     parts = []
     if added:
         if len(added) == 1:
-            parts.append(f"{kind.capitalize()} {_quote_join(added)} added to the pool!")
+            parts.append(f"{kind.capitalize()} added to the pool!")
         else:
-            parts.append(
-                f"{len(added)} {kind}s added to the pool: {_quote_join(added)}"
-            )
+            parts.append(f"{len(added)} {kind}s added to the pool!")
     else:
         parts.append(f"No new {kind}s added.")
     if skipped:
-        parts.append(f"Skipped (already in the pool): {_quote_join(skipped)}")
+        parts.append(f"Skipped {len(skipped)} already in the pool.")
     return "\n".join(parts)
 
 
-def _format_countdown(seconds: float) -> str:
+def _countdown_span(seconds: float) -> str:
     total_minutes = max(0, round(seconds / 60))
     if total_minutes == 0:
-        return "The next daily-doodle pull is in less than a minute."
+        return "less than a minute"
 
     hours, minutes = divmod(total_minutes, 60)
     if hours and minutes:
-        span = f"{hours}h {minutes}m"
-    elif hours:
-        span = f"{hours}h"
-    else:
-        span = f"{minutes}m"
-    return f"The next daily-doodle pull is in {span}."
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes}m"
+
+
+def _format_countdown(seconds: float) -> str:
+    return f"The next daily-doodle pull is in {_countdown_span(seconds)}."
 
 
 # --- streak helpers (pure, no I/O) ---
@@ -116,6 +118,35 @@ def _parse_last_date(value):
     return datetime.date.fromisoformat(value) if value else None
 
 
+# --- auto-pull state (persisted in firebase config doc) ---
+
+
+async def _is_auto_pull_paused() -> bool:
+    return await get_firebase_value(
+        CONFIG_COLLECTION, CONFIG_DOCUMENT, PAUSED_FIELD, False
+    )
+
+
+async def _set_auto_pull_paused(paused: bool) -> None:
+    await firebase_db.collection(CONFIG_COLLECTION).document(CONFIG_DOCUMENT).set(
+        {PAUSED_FIELD: paused}, merge=True
+    )
+
+
+async def _record_pull_date() -> None:
+    await firebase_db.collection(CONFIG_COLLECTION).document(CONFIG_DOCUMENT).set(
+        {LAST_PULL_FIELD: _today().isoformat()}, merge=True
+    )
+
+
+async def _pulled_today() -> bool:
+    snapshot = (
+        await firebase_db.collection(CONFIG_COLLECTION).document(CONFIG_DOCUMENT).get()
+    )
+    data = snapshot.to_dict() if snapshot.exists else {}
+    return data.get(LAST_PULL_FIELD) == _today().isoformat()
+
+
 async def perform_pull(bot: lightbulb.BotApp) -> str:
     characters = await firebase_db.collection(CHARACTERS_COLLECTION).get()
     prompts = _active_prompts(await firebase_db.collection(PROMPTS_COLLECTION).get())
@@ -143,6 +174,7 @@ async def perform_pull(bot: lightbulb.BotApp) -> str:
         return f"Couldn't find a #{DAILY_DOODLE_CHANNEL} channel to post in."
 
     await bot.rest.create_message(channel.id, message)
+    await _record_pull_date()
     return f"Pulled a {kind}! Posted in #{DAILY_DOODLE_CHANNEL}."
 
 
@@ -152,6 +184,9 @@ async def perform_pull(bot: lightbulb.BotApp) -> str:
 @tasks.task(tasks.CronTrigger(DAILY_PULL_CRON), auto_start=True, pass_app=True)
 async def daily_pull_task(app: lightbulb.BotApp) -> None:
     try:
+        if await _is_auto_pull_paused():
+            logger.info("Daily doodle auto pull is paused; skipping")
+            return
         await perform_pull(app)
     except Exception:
         logger.exception("Daily doodle pull failed")
@@ -250,32 +285,78 @@ async def add_prompt(ctx: lightbulb.Context) -> None:
     prompts_ref = firebase_db.collection(PROMPTS_COLLECTION)
     active = _active_prompts(await prompts_ref.get())
     if any(doc.get("name", "").lower() == prompt.lower() for doc in active):
-        await ctx.respond(f'Prompt "{prompt}" is already in the pool.')
+        await ctx.respond("That prompt is already in the pool.")
         return
 
     await prompts_ref.add({"name": prompt, "author": ctx.author.username})
-    await ctx.respond(f'Prompt "{prompt}" added to the pool!')
-
-
-@daily_doodle.child
-@lightbulb.command("count", "count the characters and prompts in the pool")
-@lightbulb.implements(lightbulb.SlashSubCommand)
-async def count(ctx: lightbulb.Context) -> None:
-    characters = await firebase_db.collection(CHARACTERS_COLLECTION).get()
-    prompts = _active_prompts(await firebase_db.collection(PROMPTS_COLLECTION).get())
-
-    await ctx.respond(
-        f"{len(characters)} characters and {len(prompts)} prompts in the pool"
-    )
+    await ctx.respond("Prompt added to the pool!")
 
 
 @daily_doodle.child
 @lightbulb.command("countdown", "how long until the next automatic pull")
 @lightbulb.implements(lightbulb.SlashSubCommand)
 async def countdown(ctx: lightbulb.Context) -> None:
+    if await _is_auto_pull_paused():
+        await ctx.respond("Automatic pulls are paused. Use `/daily-doodle resume` to restart them.")
+        return
+
     # Fresh trigger instance so we don't advance the running task's croniter state
     seconds = tasks.CronTrigger(DAILY_PULL_CRON).get_interval()
     await ctx.respond(_format_countdown(seconds))
+
+
+@daily_doodle.child
+@lightbulb.command("pause", "pause the automatic daily pull")
+@lightbulb.implements(lightbulb.SlashSubCommand)
+async def pause(ctx: lightbulb.Context) -> None:
+    if await _is_auto_pull_paused():
+        await ctx.respond("Automatic pulls are already paused.")
+        return
+
+    await _set_auto_pull_paused(True)
+    await ctx.respond("Automatic daily pulls are now paused. Manual `pull` still works.")
+
+
+@daily_doodle.child
+@lightbulb.command("resume", "resume the automatic daily pull")
+@lightbulb.implements(lightbulb.SlashSubCommand)
+async def resume(ctx: lightbulb.Context) -> None:
+    if not await _is_auto_pull_paused():
+        await ctx.respond("Automatic pulls are already running.")
+        return
+
+    await _set_auto_pull_paused(False)
+
+    # If nothing has been pulled today, pull now so there's something to draw
+    if await _pulled_today():
+        await ctx.respond("Automatic daily pulls are back on!")
+    else:
+        result = await perform_pull(ctx.bot)
+        await ctx.respond(f"Automatic daily pulls are back on! Nothing was active, so:\n{result}")
+
+
+@daily_doodle.child
+@lightbulb.command("status", "show the daily doodle status")
+@lightbulb.implements(lightbulb.SlashSubCommand)
+async def status(ctx: lightbulb.Context) -> None:
+    paused = await _is_auto_pull_paused()
+    characters = await firebase_db.collection(CHARACTERS_COLLECTION).get()
+    prompts = _active_prompts(await firebase_db.collection(PROMPTS_COLLECTION).get())
+    pulled_today = await _pulled_today()
+
+    if paused:
+        auto_line = "Auto pulls: paused"
+    else:
+        seconds = tasks.CronTrigger(DAILY_PULL_CRON).get_interval()
+        auto_line = f"Auto pulls: running (next in {_countdown_span(seconds)})"
+
+    lines = [
+        "**Daily Doodle Status**",
+        auto_line,
+        f"Pool: {len(characters)} characters, {len(prompts)} prompts",
+        f"Today's doodle: {'posted' if pulled_today else 'not yet'}",
+    ]
+    await ctx.respond("\n".join(lines))
 
 
 @daily_doodle.child
