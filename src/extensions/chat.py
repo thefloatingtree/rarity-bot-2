@@ -93,7 +93,7 @@ async def chat_clear_history(ctx: lightbulb.Context) -> None:
 @chat.child
 @lightbulb.option("prompt", "the system prompt")
 @lightbulb.command(
-    "set_system_prompt",
+    "set-system-prompt",
     "change the bot's personality, also clears the bot's memory of the conversation",
 )
 @lightbulb.implements(lightbulb.PrefixSubCommand, lightbulb.SlashSubCommand)
@@ -107,7 +107,7 @@ async def chat_set_system_prompt(ctx: lightbulb.Context) -> None:
 
 
 @chat.child
-@lightbulb.command("get_system_prompt", "get the current system prompt")
+@lightbulb.command("get-system-prompt", "get the current system prompt")
 @lightbulb.implements(lightbulb.PrefixSubCommand, lightbulb.SlashSubCommand)
 async def chat_get_system_prompt(ctx: lightbulb.Context) -> None:
     system_prompt = await get_firebase_value(
@@ -119,7 +119,7 @@ async def chat_get_system_prompt(ctx: lightbulb.Context) -> None:
 
 @chat.child
 @lightbulb.command(
-    "reset_system_prompt_to_default", "makes rarity be like rarity again"
+    "reset-system-prompt-to-default", "makes rarity be like rarity again"
 )
 @lightbulb.implements(lightbulb.PrefixSubCommand, lightbulb.SlashSubCommand)
 async def chat_reset_system_prompt(ctx: lightbulb.Context) -> None:

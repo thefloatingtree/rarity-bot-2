@@ -8,7 +8,7 @@ plugin = lightbulb.Plugin("drawings_from_a_hat")
 
 
 @plugin.command
-@lightbulb.command("drawings_from_a_hat", "add and pull random art prompts!")
+@lightbulb.command("drawings-from-a-hat", "add and pull random art prompts!")
 @lightbulb.implements(lightbulb.SlashCommandGroup)
 async def drawings_from_a_hat(ctx: lightbulb.Context):
     pass

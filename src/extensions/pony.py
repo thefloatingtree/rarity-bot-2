@@ -19,7 +19,7 @@ async def pony(ctx: lightbulb.Context):
 
 
 @plugin.command
-@lightbulb.command("rarity_loves_twilight", "send the gif")
+@lightbulb.command("rarity-loves-twilight", "send the gif")
 @lightbulb.implements(lightbulb.PrefixCommand, lightbulb.SlashCommand)
 async def rarity_loves_twilight(ctx: lightbulb.Context):
     await ctx.respond(
@@ -28,7 +28,7 @@ async def rarity_loves_twilight(ctx: lightbulb.Context):
 
 
 @plugin.command
-@lightbulb.command("emergency_raritwi", "raritwi images")
+@lightbulb.command("emergency-raritwi", "raritwi images")
 @lightbulb.implements(lightbulb.PrefixCommand, lightbulb.SlashCommand)
 async def emergency_raritwi(ctx: lightbulb.Context):
     response = search_derpi(["rarilight", "pony"])
@@ -36,7 +36,7 @@ async def emergency_raritwi(ctx: lightbulb.Context):
 
 
 @plugin.command
-@lightbulb.command("emergency_rarity", "rarity images")
+@lightbulb.command("emergency-rarity", "rarity images")
 @lightbulb.implements(lightbulb.PrefixCommand, lightbulb.SlashCommand)
 async def emergency_rarity(ctx: lightbulb.Context):
     response = search_derpi(["rarity", "pony", "solo"])
@@ -44,7 +44,7 @@ async def emergency_rarity(ctx: lightbulb.Context):
 
 
 @plugin.command
-@lightbulb.command("emergency_twilight", "twilight images")
+@lightbulb.command("emergency-twilight", "twilight images")
 @lightbulb.implements(lightbulb.PrefixCommand, lightbulb.SlashCommand)
 async def emergency_twilight(ctx: lightbulb.Context):
     response = search_derpi(["ts", "pony", "solo"])

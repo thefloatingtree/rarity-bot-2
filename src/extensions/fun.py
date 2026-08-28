@@ -13,7 +13,7 @@ async def hello(ctx: lightbulb.Context):
 
 
 @plugin.command
-@lightbulb.command("what_do_you_think", "decisions, decisions...")
+@lightbulb.command("what-do-you-think", "decisions, decisions...")
 @lightbulb.implements(lightbulb.PrefixCommand, lightbulb.SlashCommand)
 async def what_do_you_think(ctx: lightbulb.Context):
     if bool(random.getrandbits(1)):
@@ -23,7 +23,7 @@ async def what_do_you_think(ctx: lightbulb.Context):
 
 
 @plugin.command
-@lightbulb.command("rate_this", "0/10 never using again")
+@lightbulb.command("rate-this", "0/10 never using again")
 @lightbulb.implements(lightbulb.PrefixCommand, lightbulb.SlashCommand)
 async def rate_this(ctx: lightbulb.Context):
     rating = random.randint(0, 10)
@@ -31,7 +31,7 @@ async def rate_this(ctx: lightbulb.Context):
 
 
 @plugin.command
-@lightbulb.command("tell_me_a_joke", "i've never laughed harder in my life")
+@lightbulb.command("tell-me-a-joke", "i've never laughed harder in my life")
 @lightbulb.implements(lightbulb.PrefixCommand, lightbulb.SlashCommand)
 async def tell_me_a_joke(ctx: lightbulb.Context):
     jokes = [
