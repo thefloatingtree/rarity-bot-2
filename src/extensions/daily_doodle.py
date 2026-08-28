@@ -58,6 +58,21 @@ def _added_summary(kind: str, added, skipped) -> str:
     return "\n".join(parts)
 
 
+def _format_countdown(seconds: float) -> str:
+    total_minutes = max(0, round(seconds / 60))
+    if total_minutes == 0:
+        return "The next daily-doodle pull is in less than a minute."
+
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        span = f"{hours}h {minutes}m"
+    elif hours:
+        span = f"{hours}h"
+    else:
+        span = f"{minutes}m"
+    return f"The next daily-doodle pull is in {span}."
+
+
 async def perform_pull(bot: lightbulb.BotApp) -> str:
     characters = await firebase_db.collection(CHARACTERS_COLLECTION).get()
     prompts = _active_prompts(await firebase_db.collection(PROMPTS_COLLECTION).get())
@@ -169,6 +184,15 @@ async def count(ctx: lightbulb.Context) -> None:
     await ctx.respond(
         f"{len(characters)} characters and {len(prompts)} prompts in the pool"
     )
+
+
+@daily_doodle.child
+@lightbulb.command("countdown", "how long until the next automatic pull")
+@lightbulb.implements(lightbulb.SlashSubCommand)
+async def countdown(ctx: lightbulb.Context) -> None:
+    # Fresh trigger instance so we don't advance the running task's croniter state
+    seconds = tasks.CronTrigger(DAILY_PULL_CRON).get_interval()
+    await ctx.respond(_format_countdown(seconds))
 
 
 @daily_doodle.child
