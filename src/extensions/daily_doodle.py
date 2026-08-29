@@ -9,6 +9,7 @@ from lightbulb.ext import tasks
 
 from config import firebase_db, ENABLED_GUILD
 from services import author_fields, get_firebase_value
+from utilities import pluralize
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,14 @@ PROMPTS_COLLECTION = "daily_doodle_prompts"
 STREAKS_COLLECTION = "daily_doodle_streaks"
 CONFIG_COLLECTION = "daily_doodle_config"
 CONFIG_DOCUMENT = "settings"
+GROUP_STREAK_DOCUMENT = "group_streak"
 PAUSED_FIELD = "auto_pull_paused"
 LAST_PULL_FIELD = "last_pull_date"
 DAILY_PULL_CRON = "0 12 * * *"  # 08:00 US Eastern (EDT); winter EST would be "0 13 * * *"
 
 # Streaks count in US Eastern calendar days (matching the pull). A streak survives skipping
 # up to GRACE_DAYS days, so a gap up to CONTINUE_GAP days between posts still continues it.
+# The group streak works the same way, except any one member's post covers everybody.
 STREAK_TZ = ZoneInfo("America/New_York")
 GRACE_DAYS = 2
 CONTINUE_GAP = 1 + GRACE_DAYS  # 3
@@ -163,6 +166,48 @@ async def _pulled_today() -> bool:
     return data.get(LAST_PULL_FIELD) == _today().isoformat()
 
 
+def _group_streak_ref():
+    return firebase_db.collection(CONFIG_COLLECTION).document(GROUP_STREAK_DOCUMENT)
+
+
+async def _record_group_post(today) -> None:
+    """Count a qualifying post toward the group streak. One post covers everyone,
+    so this is a no-op once somebody has posted today."""
+    ref = _group_streak_ref()
+    snapshot = await ref.get()
+    data = snapshot.to_dict() if snapshot.exists else {}
+
+    new_streak = _next_streak(
+        data.get("streak", 0), _parse_last_date(data.get("last_date")), today
+    )
+    if new_streak is None:
+        return
+
+    await ref.set(
+        {
+            "streak": new_streak,
+            "last_date": today.isoformat(),
+            "best_streak": max(new_streak, data.get("best_streak", 0)),
+        }
+    )
+
+
+async def _group_streak_text() -> str:
+    snapshot = await _group_streak_ref().get()
+    data = snapshot.to_dict() if snapshot.exists else {}
+
+    current = _effective_streak(
+        data.get("streak", 0), _parse_last_date(data.get("last_date")), _today()
+    )
+    best = data.get("best_streak", 0)
+
+    if current > 0:
+        return f"🔥 **Group streak: {current} {pluralize(current, 'day')}** (best: {best})"
+    if best > 0:
+        return f"No active group streak. Best so far: {best} {pluralize(best, 'day')}"
+    return "No group streak yet"
+
+
 async def _leaderboard_text() -> str:
     today = _today()
     entries = []
@@ -180,7 +225,7 @@ async def _leaderboard_text() -> str:
 
     entries.sort(key=lambda entry: entry[0], reverse=True)
     lines = [
-        f"{index + 1}. <@{user_id}> {streak_count} days"
+        f"{index + 1}. <@{user_id}> {streak_count} {pluralize(streak_count, 'day')}"
         for index, (streak_count, user_id) in enumerate(entries[:10])
     ]
     return "**Daily Doodle Streaks**\n" + "\n".join(lines)
@@ -212,7 +257,7 @@ async def perform_pull(bot: lightbulb.BotApp) -> str:
     if channel is None:
         return f"Couldn't find a #{DAILY_DOODLE_CHANNEL} channel to post in."
 
-    message = f"{message}\n\n{await _leaderboard_text()}"
+    message = f"{message}\n\n{await _group_streak_text()}"
     await bot.rest.create_message(channel.id, message, user_mentions=False)
     await _record_pull_date()
     return f"Pulled a {kind}! Posted in #{DAILY_DOODLE_CHANNEL}."
@@ -248,6 +293,8 @@ async def streak_listener(event: hikari.GuildMessageCreateEvent) -> None:
         return
 
     today = _today()
+    await _record_group_post(today)
+
     streak_ref = firebase_db.collection(STREAKS_COLLECTION).document(str(event.author_id))
     snapshot = await streak_ref.get()
     data = snapshot.to_dict() if snapshot.exists else {}
@@ -468,7 +515,8 @@ async def streak(ctx: lightbulb.Context) -> None:
 @lightbulb.command("leaderboard", "show the top daily doodle streaks")
 @lightbulb.implements(lightbulb.SlashSubCommand)
 async def leaderboard(ctx: lightbulb.Context) -> None:
-    await ctx.respond(await _leaderboard_text(), user_mentions=False)
+    message = f"{await _group_streak_text()}\n\n{await _leaderboard_text()}"
+    await ctx.respond(message, user_mentions=False)
 
 
 def load(bot: lightbulb.BotApp) -> None:
