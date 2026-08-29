@@ -2,6 +2,7 @@ import hikari
 import lightbulb
 
 from config import firebase_db
+from services import author_fields, author_reference, display_name
 
 plugin = lightbulb.Plugin("emote")
 
@@ -22,14 +23,15 @@ async def emote_list(ctx: lightbulb.Context) -> None:
 
     response = ""
     for index, emote in enumerate(emotes):
-        name = emote.get("name")
-        author = emote.get("author")
+        data = emote.to_dict()
+        name = data.get("name")
+        author = author_reference(data)
         response += f"{index + 1}) **{name}** added by {author}\n"
 
     if not response:
         response = "Emote list is empty"
 
-    await ctx.respond(response)
+    await ctx.respond(response, user_mentions=False)
 
 
 @emote.child
@@ -45,7 +47,7 @@ async def emote_add(ctx: lightbulb.Context) -> None:
     if not emotes:
         await emotes_ref.add(
             {
-                "author": ctx.author.username,
+                **author_fields(ctx.author),
                 "url": ctx.options.url,
                 "name": ctx.options.name,
             }
@@ -53,7 +55,7 @@ async def emote_add(ctx: lightbulb.Context) -> None:
 
         success_embed = hikari.Embed(title=f"New Emote: {ctx.options.name}")
         success_embed.set_image(ctx.options.url)
-        success_embed.set_footer(ctx.author.username)
+        success_embed.set_footer(display_name(ctx.author, ctx.member))
 
         await ctx.respond(success_embed)
     else:

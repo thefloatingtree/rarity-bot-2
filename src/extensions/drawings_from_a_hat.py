@@ -3,6 +3,7 @@ import random
 import lightbulb
 
 from config import firebase_db
+from services import author_fields
 
 plugin = lightbulb.Plugin("drawings_from_a_hat")
 
@@ -24,7 +25,7 @@ async def drawings_from_a_hat_add(ctx: lightbulb.Context) -> None:
 
     await prompts_ref.add(
         {
-            "author": ctx.author.username,
+            **author_fields(ctx.author),
             "name": ctx.options.prompt,
         }
     )
@@ -43,7 +44,9 @@ async def drawings_from_a_hat_pull(ctx: lightbulb.Context) -> None:
         prompt = random.choice(prompts)
 
         await ctx.author.send(f'Your prompt is:\n```{prompt.get("name")}```')
-        await ctx.respond(f"Prompt sent to {ctx.author.username} in dm")
+        await ctx.respond(
+            f"Prompt sent to {ctx.author.mention} in dm", user_mentions=False
+        )
     else:
         await ctx.respond("There are no prompts in the hat")
 

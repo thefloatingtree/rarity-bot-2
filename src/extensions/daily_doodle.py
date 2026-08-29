@@ -8,7 +8,7 @@ import lightbulb
 from lightbulb.ext import tasks
 
 from config import firebase_db, ENABLED_GUILD
-from services import get_firebase_value
+from services import author_fields, get_firebase_value
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,29 @@ async def _pulled_today() -> bool:
     return data.get(LAST_PULL_FIELD) == _today().isoformat()
 
 
+async def _leaderboard_text() -> str:
+    today = _today()
+    entries = []
+    for doc in await firebase_db.collection(STREAKS_COLLECTION).get():
+        data = doc.to_dict()
+        current = _effective_streak(
+            data.get("streak", 0), _parse_last_date(data.get("last_date")), today
+        )
+        if current > 0:
+            # Streak docs are keyed by user id, so the name shown is always current
+            entries.append((current, doc.id))
+
+    if not entries:
+        return "No active daily doodle streaks yet"
+
+    entries.sort(key=lambda entry: entry[0], reverse=True)
+    lines = [
+        f"{index + 1}. <@{user_id}> {streak_count} days"
+        for index, (streak_count, user_id) in enumerate(entries[:10])
+    ]
+    return "**Daily Doodle Streaks**\n" + "\n".join(lines)
+
+
 async def perform_pull(bot: lightbulb.BotApp) -> str:
     characters = await firebase_db.collection(CHARACTERS_COLLECTION).get()
     prompts = _active_prompts(await firebase_db.collection(PROMPTS_COLLECTION).get())
@@ -189,7 +212,8 @@ async def perform_pull(bot: lightbulb.BotApp) -> str:
     if channel is None:
         return f"Couldn't find a #{DAILY_DOODLE_CHANNEL} channel to post in."
 
-    await bot.rest.create_message(channel.id, message)
+    message = f"{message}\n\n{await _leaderboard_text()}"
+    await bot.rest.create_message(channel.id, message, user_mentions=False)
     await _record_pull_date()
     return f"Pulled a {kind}! Posted in #{DAILY_DOODLE_CHANNEL}."
 
@@ -235,12 +259,8 @@ async def streak_listener(event: hikari.GuildMessageCreateEvent) -> None:
         # Already counted today — nothing to update
         return
 
-    display_name = (
-        event.member.display_name if event.member else event.author.username
-    )
     await streak_ref.set(
         {
-            "username": display_name,
             "streak": new_streak,
             "last_date": today.isoformat(),
             "best_streak": max(new_streak, data.get("best_streak", 0)),
@@ -282,7 +302,7 @@ async def add_character(ctx: lightbulb.Context) -> None:
             skipped.append(name)
             continue
         seen.add(key)
-        await characters_ref.add({"name": name, "author": ctx.author.username})
+        await characters_ref.add({"name": name, **author_fields(ctx.author)})
         added.append(name)
 
     await ctx.respond(_added_summary("character", added, skipped))
@@ -304,7 +324,7 @@ async def add_prompt(ctx: lightbulb.Context) -> None:
         await ctx.respond("That prompt is already in the pool.")
         return
 
-    await prompts_ref.add({"name": prompt, "author": ctx.author.username})
+    await prompts_ref.add({"name": prompt, **author_fields(ctx.author)})
     await ctx.respond("Prompt added to the pool!")
 
 
@@ -432,7 +452,7 @@ async def streak(ctx: lightbulb.Context) -> None:
         data.get("streak", 0), _parse_last_date(data.get("last_date")), today
     )
     best = data.get("best_streak", 0)
-    name = target.username
+    name = target.mention
 
     if current > 0:
         message = f"🔥 {name} has a {current}-day daily doodle streak! (best: {best})"
@@ -441,33 +461,14 @@ async def streak(ctx: lightbulb.Context) -> None:
     else:
         message = f"{name} hasn't started a daily doodle streak yet."
 
-    await ctx.respond(message)
+    await ctx.respond(message, user_mentions=False)
 
 
 @daily_doodle.child
 @lightbulb.command("leaderboard", "show the top daily doodle streaks")
 @lightbulb.implements(lightbulb.SlashSubCommand)
 async def leaderboard(ctx: lightbulb.Context) -> None:
-    today = _today()
-    entries = []
-    for doc in await firebase_db.collection(STREAKS_COLLECTION).get():
-        data = doc.to_dict()
-        current = _effective_streak(
-            data.get("streak", 0), _parse_last_date(data.get("last_date")), today
-        )
-        if current > 0:
-            entries.append((current, data.get("username", "someone")))
-
-    if not entries:
-        await ctx.respond("No active daily doodle streaks yet")
-        return
-
-    entries.sort(key=lambda entry: entry[0], reverse=True)
-    lines = [
-        f"{index + 1}. **{username}** {streak_count} days"
-        for index, (streak_count, username) in enumerate(entries[:10])
-    ]
-    await ctx.respond("**Daily Doodle Streaks**\n" + "\n".join(lines))
+    await ctx.respond(await _leaderboard_text(), user_mentions=False)
 
 
 def load(bot: lightbulb.BotApp) -> None:
