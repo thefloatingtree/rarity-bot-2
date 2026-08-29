@@ -24,14 +24,32 @@ CONFIG_DOCUMENT = "settings"
 GROUP_STREAK_DOCUMENT = "group_streak"
 PAUSED_FIELD = "auto_pull_paused"
 LAST_PULL_FIELD = "last_pull_date"
-DAILY_PULL_CRON = "0 12 * * *"  # 08:00 US Eastern (EDT); winter EST would be "0 13 * * *"
 
-# Streaks count in US Eastern calendar days (matching the pull). A streak survives skipping
-# up to GRACE_DAYS days, so a gap up to CONTINUE_GAP days between posts still continues it.
-# The group streak works the same way, except any one member's post covers everybody.
-STREAK_TZ = ZoneInfo("America/New_York")
+# Everything "daily" happens in US Eastern calendar days: the pull, the streaks, the
+# grace window. The pull fires at PULL_HOUR local time regardless of DST.
+DOODLE_TZ = ZoneInfo("America/New_York")
+PULL_HOUR = 8
+
+# The pull task ticks every hour (croniter runs in UTC, but Eastern offsets are whole
+# hours so the top of the hour always lines up). Each tick pulls only if today's pull is
+# due and hasn't happened yet, so a tick that fails or a bot that was down at PULL_HOUR
+# is retried on the next hour instead of skipping the day.
+PULL_TICK_CRON = "0 * * * *"
+
+# A streak survives skipping up to GRACE_DAYS days, so a gap up to CONTINUE_GAP days
+# between posts still continues it. The group streak works the same way, except any one
+# member's post covers everybody.
 GRACE_DAYS = 2
 CONTINUE_GAP = 1 + GRACE_DAYS  # 3
+
+# Selection: pick the *kind* first so the odds don't drift as prompts get used up
+# (characters never archive, prompts do), then pick an item. Characters pulled within
+# the last CHARACTER_COOLDOWN_DAYS are skipped when there are other choices.
+PROMPT_CHANCE = 0.5
+CHARACTER_COOLDOWN_DAYS = 14
+LAST_PULLED_FIELD = "last_pulled_at"
+
+MANAGE_PERMISSIONS = hikari.Permissions.MANAGE_GUILD | hikari.Permissions.ADMINISTRATOR
 
 
 # --- shared core logic (used by /daily-doodle pull and the daily task) ---
@@ -98,15 +116,60 @@ def _countdown_span(seconds: float) -> str:
     return f"{minutes}m"
 
 
-def _format_countdown(seconds: float) -> str:
-    return f"The next daily-doodle pull is in {_countdown_span(seconds)}."
+def _find_by_name(docs, name: str):
+    """The first doc whose `name` matches case-insensitively, or None."""
+    key = name.strip().lower()
+    return next((doc for doc in docs if (doc.get("name") or "").lower() == key), None)
 
 
-# --- streak helpers (pure, no I/O) ---
+def _can_manage(ctx: lightbulb.Context, data: dict) -> bool:
+    """Whether the caller may remove a pool entry: its author, or a server manager.
+    Entries written before author ids were stored can only be removed by managers."""
+    if data.get("author_id") == str(ctx.author.id):
+        return True
+    permissions = getattr(ctx.member, "permissions", None)
+    return bool(permissions is not None and permissions & MANAGE_PERMISSIONS)
+
+
+# --- time helpers (pure, no I/O) ---
+
+
+def _now():
+    return datetime.datetime.now(DOODLE_TZ)
 
 
 def _today():
-    return datetime.datetime.now(STREAK_TZ).date()
+    return _now().date()
+
+
+def _pull_is_due(now) -> bool:
+    return now.hour >= PULL_HOUR
+
+
+def _next_pull_time(now):
+    """The next PULL_HOUR o'clock strictly after `now`, in the doodle timezone."""
+    candidate = now.replace(hour=PULL_HOUR, minute=0, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += datetime.timedelta(days=1)
+    return candidate
+
+
+def _seconds_between(start, end) -> float:
+    """Real elapsed seconds. Subtracting two datetimes in the same zone does wall-clock
+    arithmetic (a DST switch vanishes), so compare epoch timestamps instead."""
+    return end.timestamp() - start.timestamp()
+
+
+def _seconds_until_next_pull(now) -> float:
+    return _seconds_between(now, _next_pull_time(now))
+
+
+def _next_tick_time(now):
+    """The next top-of-the-hour after `now` (when a pending pull is retried)."""
+    return now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1)
+
+
+# --- streak helpers (pure, no I/O) ---
 
 
 def _has_media(message) -> bool:
@@ -137,6 +200,46 @@ def _parse_last_date(value):
     return datetime.date.fromisoformat(value) if value else None
 
 
+# --- selection helpers (pure, no I/O) ---
+
+
+def _recently_pulled(data: dict, today) -> bool:
+    value = data.get(LAST_PULLED_FIELD)
+    if not value:
+        return False
+    try:
+        pulled_on = datetime.datetime.fromisoformat(value).astimezone(DOODLE_TZ).date()
+    except ValueError:
+        return False
+    return (today - pulled_on).days < CHARACTER_COOLDOWN_DAYS
+
+
+def _eligible_characters(characters, today):
+    """Characters not pulled recently; falls back to everyone if that leaves nobody."""
+    fresh = [doc for doc in characters if not _recently_pulled(doc.to_dict(), today)]
+    return fresh or list(characters)
+
+
+def _choose(characters, prompts, today, rng=random):
+    """Pick (kind, doc) from the pool, or None if it's empty."""
+    kinds = []
+    if characters:
+        kinds.append("character")
+    if prompts:
+        kinds.append("prompt")
+    if not kinds:
+        return None
+
+    if len(kinds) == 2:
+        kind = "prompt" if rng.random() < PROMPT_CHANCE else "character"
+    else:
+        kind = kinds[0]
+
+    if kind == "character":
+        return kind, rng.choice(_eligible_characters(characters, today))
+    return kind, rng.choice(list(prompts))
+
+
 # --- auto-pull state (persisted in firebase config doc) ---
 
 
@@ -164,6 +267,21 @@ async def _pulled_today() -> bool:
     )
     data = snapshot.to_dict() if snapshot.exists else {}
     return data.get(LAST_PULL_FIELD) == _today().isoformat()
+
+
+async def _countdown_text() -> str:
+    """Where the automatic pull stands right now, for countdown/status."""
+    if await _is_auto_pull_paused():
+        return "Automatic pulls are paused. Use `/daily-doodle resume` to restart them."
+
+    now = _now()
+    if _pull_is_due(now) and not await _pulled_today():
+        retry_in = _seconds_between(now, _next_tick_time(now))
+        return (
+            "Today's pull hasn't gone out yet — it'll be retried in "
+            f"{_countdown_span(retry_in)}."
+        )
+    return f"The next daily-doodle pull is in {_countdown_span(_seconds_until_next_pull(now))}."
 
 
 def _group_streak_ref():
@@ -232,49 +350,73 @@ async def _leaderboard_text() -> str:
 
 
 async def perform_pull(bot: lightbulb.BotApp) -> str:
-    characters = await firebase_db.collection(CHARACTERS_COLLECTION).get()
-    prompts = _active_prompts(await firebase_db.collection(PROMPTS_COLLECTION).get())
-
-    pool = [("character", doc) for doc in characters] + [
-        ("prompt", doc) for doc in prompts
-    ]
-    if not pool:
-        return "The daily-doodle pool is empty. Add some characters or prompts!"
-
-    kind, doc = random.choice(pool)
-    name = doc.get("name")
-
-    if kind == "character":
-        message = f"**Daily Doodle** (optionally) draw this character:\n**{name}**"
-    else:
-        message = f"**Daily Doodle** (optionally) draw this prompt:\n**{name}**"
-        # Archive the prompt in place so it won't be pulled again, but keep it for history
-        await firebase_db.collection(PROMPTS_COLLECTION).document(doc.id).update(
-            {"archived_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
-        )
-
+    # Resolve the channel first: nothing in the pool is consumed until we know the
+    # post can actually go somewhere.
     channel = await _find_channel(bot)
     if channel is None:
         return f"Couldn't find a #{DAILY_DOODLE_CHANNEL} channel to post in."
 
+    characters = await firebase_db.collection(CHARACTERS_COLLECTION).get()
+    prompts = _active_prompts(await firebase_db.collection(PROMPTS_COLLECTION).get())
+
+    choice = _choose(characters, prompts, _today())
+    if choice is None:
+        return "The daily-doodle pool is empty. Add some characters or prompts!"
+
+    kind, doc = choice
+    name = doc.get("name")
+    message = f"**Daily Doodle** (optionally) draw this {kind}:\n**{name}**"
+
     message = f"{message}\n\n{await _group_streak_text()}"
     await bot.rest.create_message(channel.id, message, user_mentions=False)
     await _record_pull_date()
+
+    # Only after the post is out do we mark the item as used
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    if kind == "character":
+        # Remember when it was pulled so it sits out the cooldown
+        await firebase_db.collection(CHARACTERS_COLLECTION).document(doc.id).update(
+            {LAST_PULLED_FIELD: now_iso}
+        )
+    else:
+        # Archive the prompt in place so it won't be pulled again, but keep it for history
+        await firebase_db.collection(PROMPTS_COLLECTION).document(doc.id).update(
+            {"archived_at": now_iso}
+        )
+
     return f"Pulled a {kind}! Posted in #{DAILY_DOODLE_CHANNEL}."
 
 
-# --- daily automatic pull (CronTrigger runs in UTC) ---
-
-
-@tasks.task(tasks.CronTrigger(DAILY_PULL_CRON), auto_start=True, pass_app=True)
-async def daily_pull_task(app: lightbulb.BotApp) -> None:
+async def _pull_if_due(bot: lightbulb.BotApp, reason: str) -> None:
+    """Run today's automatic pull if it's time and it hasn't happened. Safe to call
+    repeatedly (hourly tick, startup) — it only ever pulls once per day."""
     try:
         if await _is_auto_pull_paused():
-            logger.info("Daily doodle auto pull is paused; skipping")
+            logger.info("Daily doodle auto pull is paused; skipping (%s)", reason)
             return
-        await perform_pull(app)
+        if not _pull_is_due(_now()):
+            return
+        if await _pulled_today():
+            return
+        logger.info("Running daily doodle pull (%s)", reason)
+        result = await perform_pull(bot)
+        logger.info("Daily doodle pull: %s", result)
     except Exception:
-        logger.exception("Daily doodle pull failed")
+        logger.exception("Daily doodle pull failed (%s)", reason)
+
+
+# --- automatic pull: hourly tick + startup catch-up ---
+
+
+@tasks.task(tasks.CronTrigger(PULL_TICK_CRON), auto_start=True, pass_app=True)
+async def daily_pull_task(app: lightbulb.BotApp) -> None:
+    await _pull_if_due(app, "hourly tick")
+
+
+@plugin.listener(hikari.StartedEvent)
+async def catch_up_on_start(event: hikari.StartedEvent) -> None:
+    # If the bot was down at PULL_HOUR, don't lose the day's doodle
+    await _pull_if_due(plugin.bot, "startup catch-up")
 
 
 # --- streak tracking (only real user uploads count; bot pulls are ignored below) ---
@@ -367,12 +509,50 @@ async def add_prompt(ctx: lightbulb.Context) -> None:
 
     prompts_ref = firebase_db.collection(PROMPTS_COLLECTION)
     active = _active_prompts(await prompts_ref.get())
-    if any(doc.get("name", "").lower() == prompt.lower() for doc in active):
+    if _find_by_name(active, prompt) is not None:
         await ctx.respond("That prompt is already in the pool.")
         return
 
     await prompts_ref.add({"name": prompt, **author_fields(ctx.author)})
     await ctx.respond("Prompt added to the pool!")
+
+
+@daily_doodle.child
+@lightbulb.option("name", "the character to remove (exact name, case-insensitive)")
+@lightbulb.command("remove-character", "remove a character you added (managers can remove any)")
+@lightbulb.implements(lightbulb.SlashSubCommand)
+async def remove_character(ctx: lightbulb.Context) -> None:
+    characters_ref = firebase_db.collection(CHARACTERS_COLLECTION)
+    doc = _find_by_name(await characters_ref.get(), ctx.options.name)
+
+    if doc is None:
+        await ctx.respond("No character by that name is in the pool.")
+        return
+    if not _can_manage(ctx, doc.to_dict()):
+        await ctx.respond("You can only remove characters you added.")
+        return
+
+    await characters_ref.document(doc.id).delete()
+    await ctx.respond(f"Removed **{doc.get('name')}** from the pool.")
+
+
+@daily_doodle.child
+@lightbulb.option("prompt", "the prompt to remove (exact text, case-insensitive)")
+@lightbulb.command("remove-prompt", "remove a prompt you added (managers can remove any)")
+@lightbulb.implements(lightbulb.SlashSubCommand)
+async def remove_prompt(ctx: lightbulb.Context) -> None:
+    prompts_ref = firebase_db.collection(PROMPTS_COLLECTION)
+    doc = _find_by_name(_active_prompts(await prompts_ref.get()), ctx.options.prompt)
+
+    if doc is None:
+        await ctx.respond("No prompt matching that text is in the pool.")
+        return
+    if not _can_manage(ctx, doc.to_dict()):
+        await ctx.respond("You can only remove prompts you added.")
+        return
+
+    await prompts_ref.document(doc.id).delete()
+    await ctx.respond(f"Removed **{doc.get('name')}** from the pool.")
 
 
 @daily_doodle.child
@@ -413,13 +593,7 @@ async def list_pool(ctx: lightbulb.Context) -> None:
 @lightbulb.command("countdown", "how long until the next automatic pull")
 @lightbulb.implements(lightbulb.SlashSubCommand)
 async def countdown(ctx: lightbulb.Context) -> None:
-    if await _is_auto_pull_paused():
-        await ctx.respond("Automatic pulls are paused. Use `/daily-doodle resume` to restart them.")
-        return
-
-    # Fresh trigger instance so we don't advance the running task's croniter state
-    seconds = tasks.CronTrigger(DAILY_PULL_CRON).get_interval()
-    await ctx.respond(_format_countdown(seconds))
+    await ctx.respond(await _countdown_text())
 
 
 @daily_doodle.child
@@ -456,20 +630,13 @@ async def resume(ctx: lightbulb.Context) -> None:
 @lightbulb.command("status", "show the daily doodle status")
 @lightbulb.implements(lightbulb.SlashSubCommand)
 async def status(ctx: lightbulb.Context) -> None:
-    paused = await _is_auto_pull_paused()
     characters = await firebase_db.collection(CHARACTERS_COLLECTION).get()
     prompts = _active_prompts(await firebase_db.collection(PROMPTS_COLLECTION).get())
     pulled_today = await _pulled_today()
 
-    if paused:
-        auto_line = "Auto pulls: paused"
-    else:
-        seconds = tasks.CronTrigger(DAILY_PULL_CRON).get_interval()
-        auto_line = f"Auto pulls: running (next in {_countdown_span(seconds)})"
-
     lines = [
         "**Daily Doodle Status**",
-        auto_line,
+        await _countdown_text(),
         f"Pool: {len(characters)} characters, {len(prompts)} prompts",
         f"Today's doodle: {'posted' if pulled_today else 'not yet'}",
     ]
@@ -477,9 +644,23 @@ async def status(ctx: lightbulb.Context) -> None:
 
 
 @daily_doodle.child
+@lightbulb.option(
+    "force",
+    "pull again even if today's doodle was already posted",
+    type=bool,
+    required=False,
+    default=False,
+)
 @lightbulb.command("pull", "force a daily doodle pull right now")
 @lightbulb.implements(lightbulb.SlashSubCommand)
 async def pull(ctx: lightbulb.Context) -> None:
+    if await _pulled_today() and not ctx.options.force:
+        await ctx.respond(
+            "Today's doodle has already been posted. Run `/daily-doodle pull force: True` "
+            "to pull another one anyway."
+        )
+        return
+
     result = await perform_pull(ctx.bot)
     await ctx.respond(result)
 
